@@ -8,6 +8,7 @@ $ oadm policy add-clusterrole-to-user pod-isolate -z default  -n project_name<br
 note: add role to serviceaccount which your pod using.<br>
 ###3) add configuraton in deploymentconfig as below:<br>
 ```yaml
+......
 - containerPort: 8080
   name: http
   protocol: TCP
@@ -25,7 +26,7 @@ readinessProbe:
 resources: {}
 terminationMessagePath: /dev/termination-log
 volumeMounts:
-......<br>
+......
 ```
 ## image
 image must contains scripts under path CHECK_SCRIPT_PATH which define in image's ENV. 
