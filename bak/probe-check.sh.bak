@@ -1,0 +1,111 @@
+#/bin/bash
+
+#---configmap---
+#must create configmap which name is probe-state.configmap context is:
+#PAUSE_INSULATE=false
+#USE_INSULATE=false
+#---error code---
+#0 probe check ok
+#1 probe check unhealthy
+#200 ose API curl error
+#217 file and var error
+
+if [ -f /opt/cfgmap/probe-state ];then
+  . /opt/cfgmap/probe-state
+fi
+# check environment variable exists,use set default value
+function find_env() {
+  var=`printenv "$1"`
+  if [ -n "$var" ]; then
+    echo $var
+  else
+    echo $2
+  fi
+}
+
+check_script_path=$(find_env "CHECK_SCRIPT_PATH" "/opt/webserver/bin")
+use_insulate_temp=${USE_INSULATE:-false}
+use_insulate=${use_insulate_temp,,}
+pause_insulate_temp=${PAUSE_INSULATE:-false}
+pause_insulate=${pause_insulate_temp,,}
+expect_num=$(find_env "EXPECT_COUNT" 2)
+retry_times=$(find_env "RETRY_TIMES" 3)
+pod_name=$(find_env "POD_NAME")
+if [ ! -n "pod_name" ];then
+   echo "Not define POD_NAME"
+   exit 217
+fi
+
+if [ ! -f $check_script_path/probe-utils.sh ];then
+  exit 217
+fi
+. $check_script_path/probe-utils.sh
+
+SECRET_PATH='/var/run/secrets/kubernetes.io/serviceaccount'
+CA_FILE=${SECRET_PATH}/ca.crt
+TOKEN_FILE=${SECRET_PATH}/token
+NAMESPACE_FILE=${SECRET_PATH}/namespace
+MASTER_URL='https://kubernetes.default.svc.cluster.local'
+NAMESPACE=`cat $NAMESPACE_FILE`
+TOKEN=`cat $TOKEN_FILE`
+flag=0
+pod_file_path=/tmp/${pod_name}.pod.info.json
+dc_name_temp=`echo ${pod_name%-*}`
+dc_name=`echo ${dc_name_temp%-*}`
+dc_file_path=/tmp/${dc_name}.dc.info.json
+
+if [ ! -f /tmp/times ];then
+  echo 0 > /tmp/times
+fi
+if [ -f ${check_script_path}/readiness.sh ];then
+  /bin/sh ${check_script_path}/readiness.sh
+  if [ $? == 0 ];then
+     echo 0 > /tmp/times
+     exit 0
+  else
+     flag=1
+     times=`cat /tmp/times`
+     times=$(($times + 1))
+     echo $times > /tmp/times
+  fi
+fi
+if [ "$flag" == "1" -a "$use_insulate" == "false" ];then
+  echo 0 > /tmp/times
+  exit 1
+fi 
+if [ "$flag" == "1" -a "$use_insulate" == "true" ];then
+  request_ose_api $CA_FILE $TOKEN $MASTER_URL $NAMESPACE pods GET $pod_name $pod_file_path
+  check_status=$(get_pod_probe_state)
+  if [ "$check_status" == "false" ];then
+    echo 0 > /tmp/times
+    exit 1
+  fi
+  current_times=`cat /tmp/times`
+  failureThreshold=`cat "$pod_file_path" | grep failureThreshold | cut -d ':' -f 2 | cut -d ' ' -f 2`
+  if [ $failureThreshold ];then
+    retry_times=$(($failureThreshold - 1))
+  fi 
+  if [ "$current_times" -ge "$retry_times" -a "$pause_insulate" == "false" ];then
+    request_ose_api $CA_FILE $TOKEN $MASTER_URL $NAMESPACE deploymentconfigs GET $dc_name $dc_file_path
+    update_pod_labels
+    request_ose_api $CA_FILE $TOKEN $MASTER_URL $NAMESPACE pods PUT $pod_name $pod_file_path
+    annotations_context_temp=$(generate_annotations_context $pod_name $dc_file_path)
+    oldest_pod_name=`echo ${annotations_context_temp#*|}`
+    annotations_context=`echo ${annotations_context_temp%|*}`
+    inject_annotations "$annotations_context" "$dc_file_path"
+    request_ose_api $CA_FILE $TOKEN $MASTER_URL $NAMESPACE deploymentconfigs PUT $dc_name $dc_file_path
+    echo 0 > /tmp/times
+  fi
+  if [ "$current_times" -ge "$retry_times" -a "$pause_insulate" == "true" ];then
+    oldest_pod_name=$pod_name  
+    echo 0 > /tmp/times
+  fi
+  if [ ! -n "$oldest_pod_name" ];then
+    exit 1
+  fi
+  read -a delete_pod <<< $oldest_pod_name
+  for unhealth_pod in ${delete_pod[@]};do
+    request_ose_api $CA_FILE $TOKEN $MASTER_URL $NAMESPACE pods DELETE $unhealthy_pod $pod_file_path
+  done
+  exit 1
+fi
