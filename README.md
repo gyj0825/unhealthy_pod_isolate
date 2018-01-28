@@ -29,4 +29,4 @@ volumeMounts:
 ......
 ```
 ## image
-image must contains scripts under path CHECK_SCRIPT_PATH which define in image's ENV. 
+image must contains scripts under path CHECK_SCRIPT_PATH which define in image's ENV
